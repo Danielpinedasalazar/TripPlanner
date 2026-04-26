@@ -109,21 +109,29 @@ def _fmt(minutes: int) -> str:
 
 def _build_remarks(segments: list[Segment]) -> list[dict]:
     """
-    One remark per duty-status change.
+    One remark per duty-status change, deduplicating consecutive entries at the
+    same location so the driver doesn't appear to stop in the same city twice.
     Returns structured dicts so the frontend can position city labels on the grid.
     """
     remarks = []
     last_status = None
+    last_location = None
     for s in segments:
         if s.status == last_status:
+            continue
+        loc = s.location or ""
+        # Skip if the location hasn't changed — driver hasn't moved, no new label needed.
+        if loc and loc == last_location:
+            last_status = s.status
             continue
         remarks.append({
             "time": s.start_hhmm,
             "time_minutes": s.start_min,
-            "location": s.location or "",
+            "location": loc,
             "status": s.status,
         })
         last_status = s.status
+        last_location = loc
     return remarks
 
 
@@ -269,10 +277,14 @@ def plan_trip(
     def on_duty_not_driving(duration_min: int, location: str,
                             stop_type: str | None = None,
                             mile_marker: float | None = None):
-        nonlocal window_start_min
+        nonlocal window_start_min, cumulative_driving_since_break
         check_cycle_available(duration_min)
         if window_start_min is None:
             window_start_min = now_min
+        # Per FMCSA §395.3(a)(3)(ii): ≥30 consecutive non-driving minutes resets
+        # the break clock — pickup (60 min) and fuel stops (30 min) both qualify.
+        if duration_min >= BREAK_DURATION:
+            cumulative_driving_since_break = 0
         start_abs = now_min
         add_segment("on_duty_not_driving", duration_min, location)
         if stop_type:
