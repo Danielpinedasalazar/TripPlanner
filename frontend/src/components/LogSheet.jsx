@@ -292,43 +292,44 @@ export default function LogSheet({ sheet }) {
           );
         })}
 
-        {/* Per-remark: small rectangular flag on the ruler + angled top-down label */}
+        {/* Per-stop: FMCSA-style bracket spanning arrival → departure, with city label below */}
         {remarks.map((r, i) => {
-          const min = typeof r.time_minutes === "number"
+          const startMin = typeof r.time_minutes === "number"
             ? r.time_minutes
             : _hhmm_to_min(r.time);
-          if (min === 0 && i === 0) return null; // skip midnight label
-          const x = minuteToX(min);
+          const endMin = typeof r.end_minutes === "number"
+            ? r.end_minutes
+            : startMin + 15;
           const loc = _shortLocation(r.location || "");
           if (!loc) return null;
-          // Small filled rectangle straddling the ruler line — FMCSA marker style
-          const FLAG_W = 5;
-          const FLAG_H = 12;
-          const flagX = x - FLAG_W / 2;
-          const flagY = REMARKS_RULER_Y - FLAG_H / 2;
-          // Angled label that reads top-to-bottom (rotate +60° clockwise)
-          const labelStartY = REMARKS_RULER_Y + FLAG_H / 2 + 2;
+          const x1 = minuteToX(startMin);
+          // Ensure the bracket is at least visibly wide even for very short stops
+          const x2 = Math.max(minuteToX(endMin), x1 + 4);
+          const cx = (x1 + x2) / 2;
+          const yTop = REMARKS_RULER_Y;
+          const yBracket = REMARKS_RULER_Y + 7;
+          const labelStartY = REMARKS_RULER_Y + 11;
           return (
             <g key={`rm-${i}`}>
-              <rect
-                x={flagX}
-                y={flagY}
-                width={FLAG_W}
-                height={FLAG_H}
-                fill="#1e293b"
-                stroke="#0f172a"
-                strokeWidth={0.5}
+              {/* Bracket shape: │‾‾‾‾‾│ hanging from the ruler */}
+              <path
+                d={`M ${x1} ${yTop} L ${x1} ${yBracket} L ${x2} ${yBracket} L ${x2} ${yTop}`}
+                fill="none"
+                stroke="#1e293b"
+                strokeWidth={1.25}
+                strokeLinejoin="miter"
               />
+              {/* Angled label centered under the bracket, reading top-to-bottom */}
               <text
-                x={x}
+                x={cx}
                 y={labelStartY}
-                fontSize={8.5}
+                fontSize={9}
                 fill="#1e293b"
-                fontWeight={500}
+                fontWeight={600}
                 textAnchor="start"
-                transform={`rotate(60, ${x}, ${labelStartY})`}
+                transform={`rotate(60, ${cx}, ${labelStartY})`}
               >
-                {loc.length > 22 ? loc.slice(0, 20) + "…" : loc}
+                {loc.length > 24 ? loc.slice(0, 22) + "…" : loc}
               </text>
             </g>
           );

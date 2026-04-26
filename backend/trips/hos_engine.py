@@ -109,29 +109,41 @@ def _fmt(minutes: int) -> str:
 
 def _build_remarks(segments: list[Segment]) -> list[dict]:
     """
-    One remark per duty-status change, deduplicating consecutive entries at the
-    same location so the driver doesn't appear to stop in the same city twice.
-    Returns structured dicts so the frontend can position city labels on the grid.
+    One remark per *stop* — a continuous non-driving period at a single location.
+    Includes start AND end minute so the frontend can render an FMCSA-style
+    bracket showing arrival → departure. Pre-trip off-duty (before the day's
+    first drive) is skipped since it isn't a "stop" the driver made en route.
     """
     remarks = []
-    last_status = None
-    last_location = None
+    has_driven = False
+    current: dict | None = None
+
+    def flush():
+        nonlocal current
+        if current:
+            remarks.append(current)
+            current = None
+
     for s in segments:
-        if s.status == last_status:
+        if s.status == "driving":
+            has_driven = True
+            flush()
             continue
+        if not has_driven:
+            continue  # ignore the day's opening off-duty padding
         loc = s.location or ""
-        # Skip if the location hasn't changed — driver hasn't moved, no new label needed.
-        if loc and loc == last_location:
-            last_status = s.status
-            continue
-        remarks.append({
-            "time": s.start_hhmm,
-            "time_minutes": s.start_min,
-            "location": loc,
-            "status": s.status,
-        })
-        last_status = s.status
-        last_location = loc
+        if current and current["location"] == loc:
+            current["end_minutes"] = s.end_min  # extend the current stop
+        else:
+            flush()
+            current = {
+                "time": s.start_hhmm,
+                "time_minutes": s.start_min,
+                "end_minutes": s.end_min,
+                "location": loc,
+                "status": s.status,
+            }
+    flush()
     return remarks
 
 
