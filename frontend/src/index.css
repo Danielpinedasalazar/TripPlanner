@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Reserve vertical scrollbar gutter; hard-clip horizontal overflow at root */
+html {
+  scrollbar-gutter: stable;
+  overflow-y: scroll;
+  overflow-x: hidden;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+/* Leaflet container must have explicit height */
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+}

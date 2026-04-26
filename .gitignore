@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+
+# Python / Django
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+*.sqlite3
+db.sqlite3
+*.log
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Django build/output
+staticfiles/
+media/
+
+# Frontend (Vite / Node)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Claude internal context file
+CLAUDE.md
