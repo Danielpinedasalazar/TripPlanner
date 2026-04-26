@@ -1,6 +1,8 @@
 import axios from "axios";
 
-const client = axios.create({ baseURL: "/api" });
+const client = axios.create({
+  baseURL: (import.meta.env.VITE_API_BASE_URL ?? "") + "/api",
+});
 
 export async function planTrip(payload) {
   const { data } = await client.post("/trip/plan/", payload);
