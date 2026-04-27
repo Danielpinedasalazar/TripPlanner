@@ -1,6 +1,6 @@
 import math
 import traceback
-from datetime import date
+from datetime import date, datetime
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -43,6 +43,13 @@ class TripPlanView(APIView):
         pickup_loc = d["pickup_location"]
         dropoff_loc = d["dropoff_location"]
         cycle_used = d["current_cycle_used"]
+        # Trip start moment — defaults to today @ 06:00 if omitted, so existing
+        # callers and the API contract documented in CLAUDE.md keep working.
+        start_dt = d.get("start_datetime") or datetime.combine(
+            date.today(), datetime.min.time().replace(hour=6)
+        )
+        if start_dt.tzinfo is not None:
+            start_dt = start_dt.replace(tzinfo=None)
         driver_info = {
             "driver_name": d.get("driver_name", ""),
             "carrier_name": d.get("carrier_name", ""),
@@ -68,6 +75,23 @@ class TripPlanView(APIView):
             leg2_miles = route_data["leg_miles"][1]
             leg2_hours = route_data["leg_hours"][1]
 
+            # ── Geometry helpers for mid-route position lookup ────────
+            geometry = route_data.get("geojson", {})
+            cumulative = _cumulative_miles(geometry)
+
+            def locate_at_mile(mile_marker: float) -> str | None:
+                """Reverse-geocode the truck's actual position at `mile_marker`
+                miles into the trip. Used by the HOS engine to label fuel /
+                break / sleeper stops with their real city instead of a
+                generic 'En route (...)' placeholder."""
+                if not cumulative:
+                    return None
+                pt = _point_at_distance(geometry, cumulative, mile_marker)
+                if not pt:
+                    return None
+                lat, lng = pt
+                return routing.reverse_geocode(lat, lng)
+
             # ── HOS simulation ────────────────────────────────────────
             hos_result = hos_engine.plan_trip(
                 current_location=current_loc,
@@ -78,7 +102,8 @@ class TripPlanView(APIView):
                 leg2_miles=leg2_miles,
                 leg2_hours=leg2_hours,
                 current_cycle_used_hours=cycle_used,
-                start_date=date.today(),
+                start_datetime=start_dt,
+                locate_at_mile=locate_at_mile,
             )
 
             # ── Resolve stop coordinates ─────────────────────────────
@@ -87,8 +112,6 @@ class TripPlanView(APIView):
                 pickup_loc: pickup_coords,
                 dropoff_loc: dropoff_coords,
             }
-            geometry = route_data.get("geojson", {})
-            cumulative = _cumulative_miles(geometry)
 
             for stop in hos_result["stops"]:
                 # Named locations: use exact geocoded coords

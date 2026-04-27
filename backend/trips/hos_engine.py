@@ -1,23 +1,28 @@
 """
-FMCSA HOS Engine — 70hr/8-day Property Carrier, single driver, no sleeper berth.
+FMCSA HOS Engine — 70hr/8-day Property Carrier, single driver.
 
 Rules enforced:
   - 11 hr max driving per shift                       (§395.3(a)(3))
   - 14 hr driving window from first on-duty           (§395.3(a)(2))
   - 30 min break after 8 cumulative driving hours     (§395.3(a)(3)(ii))
-  - 10 consecutive hr off-duty between shifts         (§395.3(a)(1))
+  - 10 consecutive hr off-duty / sleeper-berth        (§395.3(a)(1))
   - 70 hr / 8-day rolling cycle (true rolling window) (§395.3(b)(2))
   - 34-hr restart resets the rolling cycle            (§395.3(c))
   - Fuel stop every 1,000 miles (~30 min on-duty not driving)
   - 1 hr on-duty (not driving) at pickup
   - 1 hr on-duty (not driving) at dropoff
   - Day starts at 06:00 unless constrained by prior shift
+
+Status conventions (§395.2):
+  - sleeper_berth : 10-hr resets and 34-hr restart (driver sleeping in truck)
+  - off_duty      : 30-min meal break, pre-trip padding, post-dropoff rest
+                    (driver relieved of all responsibility — at home)
 """
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from datetime import date, timedelta
-from typing import Literal
+from datetime import date, datetime, timedelta
+from typing import Callable, Literal
 
 # ──────────────────────────────────────────────
 # Types
@@ -37,6 +42,8 @@ FUEL_INTERVAL_MILES = 1000.0
 FUEL_STOP_DURATION = 30        # min
 PICKUP_DURATION = 60           # min
 DROPOFF_DURATION = 60          # min
+PRETRIP_DURATION = 30          # min — on-duty (not driving) DVIR at start of every shift
+POSTTRIP_DURATION = 15         # min — DVIR at end of trip before final rest
 CYCLE_MAX = 70 * 60            # 70 hr in minutes
 
 
@@ -47,6 +54,9 @@ class Segment:
     end_min: int      # minutes since midnight of log_date (0..1440); 1440 == midnight
     location: str
     log_date: date    # which calendar day this segment belongs to
+    description: str = ""  # human-readable purpose ("Pre-trip inspection",
+                           # "30 min break", "Loading freight"). Surfaces in
+                           # the FMCSA-style remarks bracket on the log sheet.
 
     @property
     def duration_min(self) -> int:
@@ -88,6 +98,7 @@ class LogSheet:
                     "start": s.start_hhmm,
                     "end": s.end_hhmm,
                     "location": s.location,
+                    "description": s.description,
                     "duration_hours": round(s.duration_min / 60, 2),
                 }
                 for s in self.segments
@@ -112,10 +123,16 @@ def _build_remarks(segments: list[Segment]) -> list[dict]:
     One remark per *stop* — a continuous non-driving period at a single location.
     Includes start AND end minute so the frontend can render an FMCSA-style
     bracket showing arrival → departure. Pre-trip off-duty (before the day's
-    first drive) is skipped since it isn't a "stop" the driver made en route.
+    first on-duty event) is skipped since it isn't a "stop" the driver made
+    en route.
+
+    Each remark also exposes a `descriptions` list of distinct purpose labels
+    (e.g. ["Pre-trip inspection", "Loading freight"]) so the bracket can show
+    multiple reasons stacked under one city name — same convention as the
+    printed FMCSA log.
     """
     remarks = []
-    has_driven = False
+    has_started = False
     current: dict | None = None
 
     def flush():
@@ -126,14 +143,22 @@ def _build_remarks(segments: list[Segment]) -> list[dict]:
 
     for s in segments:
         if s.status == "driving":
-            has_driven = True
+            has_started = True
             flush()
             continue
-        if not has_driven:
+        # Pre-trip inspection (on-duty not driving) is the canonical start of
+        # the duty day in FMCSA logs and SHOULD be the first remark — so we
+        # treat any on-duty-not-driving event as "trip has begun".
+        if s.status == "on_duty_not_driving":
+            has_started = True
+        if not has_started:
             continue  # ignore the day's opening off-duty padding
         loc = s.location or ""
+        desc = (s.description or "").strip()
         if current and current["location"] == loc:
-            current["end_minutes"] = s.end_min  # extend the current stop
+            current["end_minutes"] = s.end_min
+            if desc and desc not in current["descriptions"]:
+                current["descriptions"].append(desc)
         else:
             flush()
             current = {
@@ -142,6 +167,7 @@ def _build_remarks(segments: list[Segment]) -> list[dict]:
                 "end_minutes": s.end_min,
                 "location": loc,
                 "status": s.status,
+                "descriptions": [desc] if desc else [],
             }
     flush()
     return remarks
@@ -164,7 +190,9 @@ def plan_trip(
     leg2_miles: float,
     leg2_hours: float,
     current_cycle_used_hours: float,
-    start_date: date,
+    start_date: date | None = None,
+    start_datetime: datetime | None = None,
+    locate_at_mile: Callable[[float], str | None] | None = None,
 ) -> dict:
     """
     Simulate a complete trip and return route stops + log sheet data.
@@ -174,10 +202,37 @@ def plan_trip(
     leg1_miles/hours          : current_location → pickup_location
     leg2_miles/hours          : pickup_location  → dropoff_location
     current_cycle_used_hours  : on-duty hours already used in the rolling 70/8 cycle
-    start_date                : calendar date the trip begins
+    start_datetime            : exact wall-clock moment the driver begins the trip.
+                                Preferred over start_date. If only start_date is
+                                given, the trip begins at 06:00 of that day for
+                                back-compat.
+    locate_at_mile            : optional callback that, given a mile marker from
+                                trip start, returns a real "City, ST" label for
+                                that point along the route (via reverse geocoding
+                                in the views layer). Used to label fuel/break/
+                                sleep stops with their actual town instead of a
+                                generic "En route (...)" placeholder.
     """
+    # Resolve start moment ────────────────────────────────────────────────
+    if start_datetime is not None:
+        start_date = start_datetime.date()
+        start_minute_of_day = start_datetime.hour * 60 + start_datetime.minute
+    elif start_date is not None:
+        start_minute_of_day = 6 * 60   # legacy default: 06:00
+    else:
+        raise ValueError("plan_trip requires start_datetime or start_date")
 
     total_trip_miles = leg1_miles + leg2_miles
+
+    def resolve_location(default: str, mile_marker: float | None) -> str:
+        """Try the route-aware locator; fall back to the generic label."""
+        if locate_at_mile is None or mile_marker is None:
+            return default
+        try:
+            real = locate_at_mile(mile_marker)
+        except Exception:
+            real = None
+        return real or default
 
     # ── Cycle state: track on-duty minutes per calendar day for rolling window ──
     on_duty_per_day: dict[date, int] = {}
@@ -191,12 +246,15 @@ def plan_trip(
     last_on_duty_end_abs: int | None = None
 
     # Current absolute time pointer (minutes from midnight of start_date)
-    now_min: int = 6 * 60   # start at 06:00
+    now_min: int = start_minute_of_day
 
     # Per-shift counters (reset after 10hr off-duty)
     driving_min: int = 0
     window_start_min: int | None = None
     cumulative_driving_since_break: int = 0
+    # True when the next driving call must first run a 30-min pre-trip
+    # inspection (DVIR). Set at trip start and after every 10/34-hr rest.
+    needs_pretrip: bool = True
 
     # Mileage tracking
     miles_since_fuel: float = 0.0
@@ -245,7 +303,8 @@ def plan_trip(
             cur = chunk_end
         last_on_duty_end_abs = abs_end
 
-    def add_segment(status: Status, duration_min: int, location: str):
+    def add_segment(status: Status, duration_min: int, location: str,
+                    description: str = ""):
         """Append one or more Segments (split at midnight) and advance now_min."""
         nonlocal now_min
         if duration_min <= 0:
@@ -270,6 +329,7 @@ def plan_trip(
                 end_min=seg_end_local,
                 location=location,
                 log_date=current_date_for(cur),
+                description=description,
             ))
             cur = seg_end_abs
 
@@ -288,7 +348,8 @@ def plan_trip(
 
     def on_duty_not_driving(duration_min: int, location: str,
                             stop_type: str | None = None,
-                            mile_marker: float | None = None):
+                            mile_marker: float | None = None,
+                            description: str = ""):
         nonlocal window_start_min, cumulative_driving_since_break
         check_cycle_available(duration_min)
         if window_start_min is None:
@@ -298,30 +359,65 @@ def plan_trip(
         if duration_min >= BREAK_DURATION:
             cumulative_driving_since_break = 0
         start_abs = now_min
-        add_segment("on_duty_not_driving", duration_min, location)
+        add_segment("on_duty_not_driving", duration_min, location, description=description)
         if stop_type:
-            stops.append(_stop(stop_type, location, start_abs, now_min, mile_marker))
+            stops.append(_stop(stop_type, location, start_abs, now_min,
+                               mile_marker, description=description))
+
+    def take_pretrip(location: str, mile_marker: float | None = None):
+        """30-min pre-trip inspection (DVIR) at the start of every shift —
+        logged as on-duty (not driving). FMCSA §396.13."""
+        nonlocal needs_pretrip
+        loc = resolve_location(location, mile_marker)
+        on_duty_not_driving(PRETRIP_DURATION, loc,
+                            stop_type="pretrip", mile_marker=mile_marker,
+                            description="Pre-trip inspection")
+        needs_pretrip = False
+
+    def take_posttrip(location: str, mile_marker: float | None = None):
+        """Brief post-trip inspection at the end of the trip, before the
+        final 10-hr rest. On-duty (not driving). FMCSA §396.11."""
+        on_duty_not_driving(POSTTRIP_DURATION, location,
+                            stop_type="posttrip", mile_marker=mile_marker,
+                            description="Post-trip inspection")
 
     def take_break(location: str, mile_marker: float | None = None):
         nonlocal cumulative_driving_since_break
+        location = resolve_location(location, mile_marker)
         start_abs = now_min
-        add_segment("off_duty", BREAK_DURATION, location)
+        add_segment("off_duty", BREAK_DURATION, location, description="30 min break")
         cumulative_driving_since_break = 0
-        stops.append(_stop("break", location, start_abs, now_min, mile_marker))
+        stops.append(_stop("break", location, start_abs, now_min, mile_marker,
+                           description="30 min break"))
 
-    def take_rest(location: str, mile_marker: float | None = None):
+    def take_rest(location: str, mile_marker: float | None = None,
+                  *, final: bool = False):
+        """10-hr reset between shifts. Logged as sleeper_berth mid-trip
+        (driver sleeping in the truck); off_duty for the closing rest after
+        dropoff, when the driver is relieved of duty and goes home."""
         nonlocal driving_min, window_start_min, cumulative_driving_since_break
+        nonlocal needs_pretrip
+        if not final:
+            location = resolve_location(location, mile_marker)
         start_abs = now_min
-        add_segment("off_duty", RESET_OFF, location)
+        status: Status = "off_duty" if final else "sleeper_berth"
+        desc = "End of trip — 10 hour break" if final else "10 hour break"
+        add_segment(status, RESET_OFF, location, description=desc)
         driving_min = 0
         window_start_min = None
         cumulative_driving_since_break = 0
-        stops.append(_stop("rest", location, start_abs, now_min, mile_marker))
+        stops.append(_stop("rest", location, start_abs, now_min, mile_marker,
+                           description=desc))
+        # Driver wakes from a 10-hr rest → next shift starts with a pre-trip.
+        if not final:
+            needs_pretrip = True
 
     def fuel_stop(location: str, mile_marker: float | None = None):
         nonlocal miles_since_fuel
+        location = resolve_location(location, mile_marker)
         on_duty_not_driving(FUEL_STOP_DURATION, location,
-                            stop_type="fuel", mile_marker=mile_marker)
+                            stop_type="fuel", mile_marker=mile_marker,
+                            description="Fueling")
         miles_since_fuel = 0.0
 
     def drive_segment(miles: float, location_from: str, location_to: str,
@@ -341,6 +437,17 @@ def plan_trip(
         remaining_miles = miles
 
         while remaining_miles > 0.001:
+            done_fraction = 1 - remaining_miles / miles
+            mid_location = _interpolate_location(location_from, location_to, done_fraction)
+            mid_mile_marker = base_miles_from_start + (miles - remaining_miles)
+
+            # Pre-trip inspection at the start of every shift, before
+            # touching the wheel. take_pretrip() consumes 30 min of on-duty
+            # (not driving) time, so re-evaluate the loop on next iteration.
+            if needs_pretrip:
+                take_pretrip(mid_location, mid_mile_marker)
+                continue
+
             if window_start_min is None:
                 window_start_min = now_min
 
@@ -353,18 +460,15 @@ def plan_trip(
             miles_to_fuel = FUEL_INTERVAL_MILES - miles_since_fuel
             fuel_time_min = (miles_to_fuel / speed_mph) * 60 if speed_mph > 0 else float("inf")
 
-            done_fraction = 1 - remaining_miles / miles
-            mid_location = _interpolate_location(location_from, location_to, done_fraction)
-            mid_mile_marker = base_miles_from_start + (miles - remaining_miles)
-
             # Need a 10-hr rest first?
             if driving_remaining <= 0 or window_remaining <= 0 or cycle_remaining <= 0:
                 if cycle_remaining <= 0:
                     # Only a 34-hr restart frees more cycle hours
                     take_rest_until_restart(mid_location, mid_mile_marker)
                 else:
+                    # FMCSA: driver may resume driving the moment the 10-hr
+                    # rest ends — no artificial wait until "morning".
                     take_rest(mid_location, mid_mile_marker)
-                    _advance_to_next_morning()
                 continue
 
             # Need a 30-min break first?
@@ -408,37 +512,34 @@ def plan_trip(
                 mid_mm = base_miles_from_start + (miles - remaining_miles)
                 fuel_stop(mid_loc, mile_marker=mid_mm)
 
-    def _advance_to_next_morning():
-        """After a 10-hr (or 34-hr) reset, fast-forward off-duty until the
-        nearest upcoming 06:00 — same calendar day if we're still before 06:00,
-        otherwise the next day."""
-        nonlocal now_min, window_start_min, driving_min, cumulative_driving_since_break
-        next_600 = ((now_min - 6 * 60) // MINUTES_PER_DAY + 1) * MINUTES_PER_DAY + 6 * 60
-        if now_min < next_600:
-            gap = next_600 - now_min
-            pad_loc = all_segments[-1].location if all_segments else ""
-            add_segment("off_duty", gap, pad_loc)
-        window_start_min = None
-        driving_min = 0
-        cumulative_driving_since_break = 0
-
     def take_rest_until_restart(location: str, mile_marker: float | None = None):
-        """Take a 34-hr restart to reset the 70/8 cycle."""
+        """Take a 34-hr restart to reset the 70/8 cycle. Logged as off_duty —
+        a 34-hr restart is long enough that drivers conventionally log it as
+        off-duty (relieved of all responsibility, typically at home or a
+        hotel) rather than sleeper berth. FMCSA §395.3(c) allows any
+        combination of off-duty / sleeper-berth time, but off-duty is the
+        standard convention for a full restart. The per-shift counters are
+        zeroed; the next driving call resumes at the moment the rest ends."""
         nonlocal driving_min, window_start_min, cumulative_driving_since_break
+        nonlocal needs_pretrip
+        location = resolve_location(location, mile_marker)
         start_abs = now_min
-        add_segment("off_duty", RESTART_OFF, location)
+        add_segment("off_duty", RESTART_OFF, location,
+                    description="34 hour restart")
         driving_min = 0
         window_start_min = None
         cumulative_driving_since_break = 0
         # Cycle reset happens on next on-duty add via maybe_apply_34hr_restart()
-        stops.append(_stop("restart", location, start_abs, now_min, mile_marker))
-        _advance_to_next_morning()
+        stops.append(_stop("restart", location, start_abs, now_min, mile_marker,
+                           description="34 hour restart"))
+        needs_pretrip = True
 
     def _stop(stop_type: str, location: str, abs_start: int, abs_end: int,
-              mile_marker: float | None) -> dict:
+              mile_marker: float | None, description: str = "") -> dict:
         return {
             "type": stop_type,
             "location": location,
+            "description": description,
             "arrival": _fmt(abs_start % MINUTES_PER_DAY),
             "departure": _fmt(abs_end % MINUTES_PER_DAY),
             "arrival_date": str(current_date_for(abs_start)),
@@ -473,13 +574,15 @@ def plan_trip(
         "mile_marker": 0.0,
     })
 
-    # Leg 1: current → pickup
+    # Leg 1: current → pickup. The pre-trip inspection runs *inside*
+    # drive_segment on its first loop iteration, since needs_pretrip is True.
     drive_segment(leg1_miles, current_location, pickup_location,
                   actual_hours=leg1_hours, base_miles_from_start=0.0)
 
     # Pickup: 1 hr on-duty not driving
     on_duty_not_driving(PICKUP_DURATION, pickup_location,
-                        stop_type="pickup", mile_marker=leg1_miles)
+                        stop_type="pickup", mile_marker=leg1_miles,
+                        description="Loading freight")
 
     # Leg 2: pickup → dropoff
     drive_segment(leg2_miles, pickup_location, dropoff_location,
@@ -487,10 +590,15 @@ def plan_trip(
 
     # Dropoff: 1 hr on-duty not driving
     on_duty_not_driving(DROPOFF_DURATION, dropoff_location,
-                        stop_type="dropoff", mile_marker=total_trip_miles)
+                        stop_type="dropoff", mile_marker=total_trip_miles,
+                        description="Unloading freight")
 
-    # Final 10-hr rest to close out the trip
-    take_rest(dropoff_location, mile_marker=total_trip_miles)
+    # Post-trip inspection (DVIR §396.11) before the driver clocks off.
+    take_posttrip(dropoff_location, mile_marker=total_trip_miles)
+
+    # Final 10-hr rest to close out the trip — driver is at the dropoff
+    # facility / home, off-duty (not in the sleeper berth).
+    take_rest(dropoff_location, mile_marker=total_trip_miles, final=True)
 
     # ── Build log sheets (one per calendar day) ──────────────────────────
     sheets = _build_log_sheets(all_segments)

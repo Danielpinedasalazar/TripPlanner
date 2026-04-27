@@ -1,15 +1,43 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import TripForm from "./components/TripForm";
 import MapView from "./components/MapView";
 import StopsList from "./components/StopsList";
 import LogSheet from "./components/LogSheet";
 import { planTrip } from "./api/tripApi";
+import { exportLogSheetsToPdf } from "./utils/exportPdf";
 
 export default function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [activeSheet, setActiveSheet] = useState(0);
+  const [exporting, setExporting] = useState(false);
+  // One DOM ref per rendered LogSheet container, indexed by sheet position.
+  // Used by the PDF exporter to rasterize every sheet (including currently
+  // hidden ones, which we keep mounted off-screen).
+  const sheetRefs = useRef([]);
+
+  async function handleExportPdf() {
+    if (!result?.log_sheets?.length || exporting) return;
+    setExporting(true);
+    try {
+      const elements = sheetRefs.current.filter(Boolean);
+      const firstDate = result.log_sheets[0]?.date ?? "trip";
+      const dropoff = (result.route?.waypoints?.[2]?.label ?? "")
+        .split(",")[0]
+        .trim()
+        .replace(/\s+/g, "_") || "log";
+      await exportLogSheetsToPdf(
+        elements,
+        `eld-log_${dropoff}_${firstDate}.pdf`
+      );
+    } catch (err) {
+      console.error("PDF export failed:", err);
+      setError("PDF export failed: " + (err?.message || "unknown error"));
+    } finally {
+      setExporting(false);
+    }
+  }
 
   async function handleSubmit(payload) {
     setLoading(true);
@@ -86,10 +114,36 @@ export default function App() {
           {/* ELD log sheets */}
           {result?.log_sheets?.length > 0 && (
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              {/* Header row — title on the left, primary action on the right */}
+              <div className="flex items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-700 uppercase tracking-wide">
+                    ELD Log Sheets
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {result.log_sheets.length} day{result.log_sheets.length === 1 ? "" : "s"} · FMCSA daily log
+                  </p>
+                </div>
+                <button
+                  onClick={handleExportPdf}
+                  disabled={exporting}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold
+                             bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50
+                             disabled:cursor-not-allowed shadow-sm transition whitespace-nowrap"
+                  title="Download all log sheets as a single PDF"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                       strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  {exporting ? "Exporting…" : "Export PDF"}
+                </button>
+              </div>
+
+              {/* Day-tab navigation — its own row, no longer mixed with actions */}
               <div className="flex flex-wrap items-center gap-2 mb-4">
-                <h2 className="text-sm font-bold text-slate-700 uppercase tracking-wide mr-auto">
-                  ELD Log Sheets
-                </h2>
                 {result.log_sheets.map((sheet, i) => (
                   <button
                     key={i}
@@ -104,7 +158,30 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              <LogSheet sheet={result.log_sheets[activeSheet]} />
+
+              {/* Every log sheet is mounted so the exporter can rasterize all
+                  of them in one click. The active sheet displays in flow;
+                  the rest are pushed off-screen but remain measurable. */}
+              {result.log_sheets.map((sheet, i) => (
+                <div
+                  key={i}
+                  ref={(el) => { sheetRefs.current[i] = el; }}
+                  style={
+                    i === activeSheet
+                      ? {}
+                      : {
+                          position: "fixed",
+                          left: "-99999px",
+                          top: 0,
+                          width: 1100,        // give it a stable width so layout matches the visible sheet
+                          pointerEvents: "none",
+                        }
+                  }
+                  aria-hidden={i !== activeSheet}
+                >
+                  <LogSheet sheet={sheet} />
+                </div>
+              ))}
             </div>
           )}
 

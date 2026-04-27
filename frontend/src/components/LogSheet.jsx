@@ -16,7 +16,7 @@ const SVG_W = GRID_LEFT + GRID_W + 80;   // right margin for totals
 // Remarks ruler sits below the status rows
 const REMARKS_RULER_PAD = 14;   // gap between grid bottom and ruler line
 const REMARKS_TICK_H = 38;      // length of vertical tick from ruler down
-const REMARKS_LABEL_H = 110;    // vertical space for angled city labels
+const REMARKS_LABEL_H = 150;    // vertical space for angled city + purpose labels
 const REMARKS_BOTTOM_PAD = 16;
 
 const ROW_LABELS = ["Off Duty", "Sleeper\nBerth", "Driving", "On Duty\n(Not Drv)"];
@@ -58,13 +58,20 @@ export default function LogSheet({ sheet }) {
   // Build hour-tick X positions
   const hourTicks = Array.from({ length: 25 }, (_, i) => i);
 
-  // Half-hour and quarter-hour minor ticks
-  const quarterTicks = [];
+  // Sub-hour ticks: 3 between every hour at :15, :30, :45.
+  // The :30 (half-hour) tick is taller than the :15 / :45 ticks — exactly
+  // like the printed FMCSA daily log.
+  const subHourTicks = []; // [{ x, isHalf }]
   for (let h = 0; h < 24; h++) {
     for (let q = 1; q < 4; q++) {
-      quarterTicks.push(h + q * 0.25);
+      subHourTicks.push({
+        x: GRID_LEFT + (h + q * 0.25) * HOUR_W,
+        isHalf: q === 2,
+      });
     }
   }
+  const TICK_SHORT = 5;  // px — :15 / :45 ticks (top + bottom of each row)
+  const TICK_TALL = 11;  // px — :30 tick (taller, like a real log)
 
   // Build a single continuous step-polyline that traces status across all 4 rows.
   // Sort segments by start; for each, append [xStart, rowMidY] then [xEnd, rowMidY].
@@ -155,19 +162,34 @@ export default function LogSheet({ sheet }) {
           />
         ))}
 
-        {/* Quarter-hour minor ticks */}
-        {quarterTicks.map((h) => {
-          const x = GRID_LEFT + h * HOUR_W;
-          const isHalf = Math.abs(h % 1 - 0.5) < 0.01;
+        {/* Sub-hour ticks — 3 marks between every hour, drawn at the top and
+            bottom edges of every status row. The :30 tick is intentionally
+            taller than the :15/:45 ticks, matching the printed FMCSA log. */}
+        {ROW_STATUS.map((_, ri) => {
+          const yTop = rowY(ri);
+          const yBot = rowY(ri) + ROW_H;
           return (
-            <line
-              key={h}
-              x1={x} y1={GRID_TOP}
-              x2={x} y2={GRID_TOP + GRID_H}
-              stroke="#e2e8f0"
-              strokeWidth={isHalf ? 0.8 : 0.4}
-              strokeDasharray={isHalf ? "" : "2,2"}
-            />
+            <g key={`subticks-${ri}`}>
+              {subHourTicks.map(({ x, isHalf }, ti) => {
+                const len = isHalf ? TICK_TALL : TICK_SHORT;
+                return (
+                  <g key={ti}>
+                    <line
+                      x1={x} y1={yTop}
+                      x2={x} y2={yTop + len}
+                      stroke="#94a3b8"
+                      strokeWidth={isHalf ? 0.9 : 0.6}
+                    />
+                    <line
+                      x1={x} y1={yBot - len}
+                      x2={x} y2={yBot}
+                      stroke="#94a3b8"
+                      strokeWidth={isHalf ? 0.9 : 0.6}
+                    />
+                  </g>
+                );
+              })}
+            </g>
           );
         })}
 
@@ -292,7 +314,8 @@ export default function LogSheet({ sheet }) {
           );
         })}
 
-        {/* Per-stop: FMCSA-style bracket spanning arrival → departure, with city label below */}
+        {/* Per-stop: FMCSA-style bracket spanning arrival → departure, with
+            stacked angled labels (city on top, then each purpose / reason). */}
         {remarks.map((r, i) => {
           const startMin = typeof r.time_minutes === "number"
             ? r.time_minutes
@@ -301,7 +324,10 @@ export default function LogSheet({ sheet }) {
             ? r.end_minutes
             : startMin + 15;
           const loc = _shortLocation(r.location || "");
-          if (!loc) return null;
+          const descriptions = Array.isArray(r.descriptions) ? r.descriptions : [];
+          // First line: city; subsequent lines: each distinct purpose label.
+          const lines = [loc, ...descriptions].filter(Boolean);
+          if (lines.length === 0) return null;
           const x1 = minuteToX(startMin);
           // Ensure the bracket is at least visibly wide even for very short stops
           const x2 = Math.max(minuteToX(endMin), x1 + 4);
@@ -309,6 +335,7 @@ export default function LogSheet({ sheet }) {
           const yTop = REMARKS_RULER_Y;
           const yBracket = REMARKS_RULER_Y + 7;
           const labelStartY = REMARKS_RULER_Y + 11;
+          const LINE_GAP = 11;
           return (
             <g key={`rm-${i}`}>
               {/* Bracket shape: │‾‾‾‾‾│ hanging from the ruler */}
@@ -319,17 +346,28 @@ export default function LogSheet({ sheet }) {
                 strokeWidth={1.25}
                 strokeLinejoin="miter"
               />
-              {/* Angled label centered under the bracket, reading top-to-bottom */}
+              {/* Angled labels — first line bold (city), purpose lines lighter.
+                  All <tspan>s share the parent's rotation transform, and dy
+                  between them stacks them perpendicular to the rotated baseline. */}
               <text
                 x={cx}
                 y={labelStartY}
                 fontSize={9}
                 fill="#1e293b"
-                fontWeight={600}
                 textAnchor="start"
                 transform={`rotate(60, ${cx}, ${labelStartY})`}
               >
-                {loc.length > 24 ? loc.slice(0, 22) + "…" : loc}
+                {lines.map((ln, li) => (
+                  <tspan
+                    key={li}
+                    x={cx}
+                    dy={li === 0 ? 0 : LINE_GAP}
+                    fontWeight={li === 0 ? 700 : 500}
+                    fill={li === 0 ? "#0f172a" : "#475569"}
+                  >
+                    {ln.length > 26 ? ln.slice(0, 24) + "…" : ln}
+                  </tspan>
+                ))}
               </text>
             </g>
           );

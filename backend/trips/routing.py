@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 import requests
 from django.conf import settings
 
@@ -7,6 +9,53 @@ ORS_PROFILE = "driving-car"
 
 def _headers():
     return {"Authorization": settings.OPENROUTESERVICE_API_KEY}
+
+
+@lru_cache(maxsize=512)
+def _reverse_geocode_cached(lat_q: float, lng_q: float) -> str | None:
+    """Internal cached call. Coordinates are pre-quantized to ~0.01° (~1 km)
+    so nearby probes share a cache slot — keeps trip planning under the ORS
+    free-tier quota even on cross-country routes."""
+    url = f"{ORS_BASE}/geocode/reverse"
+    try:
+        resp = requests.get(
+            url,
+            headers=_headers(),
+            params={
+                "point.lat": lat_q,
+                "point.lon": lng_q,
+                "size": 1,
+                "layers": "locality,localadmin,county,region",
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    features = resp.json().get("features", [])
+    if not features:
+        return None
+    props = features[0].get("properties", {})
+    city = (
+        props.get("locality")
+        or props.get("localadmin")
+        or props.get("name")
+        or props.get("county")
+        or ""
+    )
+    region = props.get("region_a") or props.get("region") or ""
+    if city and region:
+        return f"{city}, {region}"
+    return city or region or None
+
+
+def reverse_geocode(lat: float, lng: float) -> str | None:
+    """Resolve a (lat, lng) pair into a 'City, ST' label, or None on failure.
+    Coordinates are quantized so nearby calls reuse the cache."""
+    if lat is None or lng is None:
+        return None
+    return _reverse_geocode_cached(round(lat, 2), round(lng, 2))
 
 
 def geocode(address: str) -> tuple[float, float]:
