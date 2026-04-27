@@ -54,6 +54,7 @@ class TripPlanView(APIView):
             "driver_name": d.get("driver_name", ""),
             "carrier_name": d.get("carrier_name", ""),
             "main_office_address": d.get("main_office_address", ""),
+            "home_terminal_address": d.get("home_terminal_address", ""),
             "vehicle_numbers": d.get("vehicle_numbers", ""),
             "shipping_number": d.get("shipping_number", ""),
             "co_driver_name": d.get("co_driver_name", ""),

@@ -3,6 +3,7 @@ import TripForm from "./components/TripForm";
 import MapView from "./components/MapView";
 import StopsList from "./components/StopsList";
 import LogSheet from "./components/LogSheet";
+import PrintLogSheet from "./components/PrintLogSheet";
 import { planTrip } from "./api/tripApi";
 import { exportLogSheetsToPdf } from "./utils/exportPdf";
 
@@ -16,12 +17,15 @@ export default function App() {
   // Used by the PDF exporter to rasterize every sheet (including currently
   // hidden ones, which we keep mounted off-screen).
   const sheetRefs = useRef([]);
+  // Print/PDF-only refs — point to the FMCSA-style PrintLogSheet renderings
+  // that are mounted off-screen for every sheet.
+  const printRefs = useRef([]);
 
   async function handleExportPdf() {
     if (!result?.log_sheets?.length || exporting) return;
     setExporting(true);
     try {
-      const elements = sheetRefs.current.filter(Boolean);
+      const elements = printRefs.current.filter(Boolean);
       const firstDate = result.log_sheets[0]?.date ?? "trip";
       const dropoff = (result.route?.waypoints?.[2]?.label ?? "")
         .split(",")[0]
@@ -159,29 +163,39 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Every log sheet is mounted so the exporter can rasterize all
-                  of them in one click. The active sheet displays in flow;
-                  the rest are pushed off-screen but remain measurable. */}
-              {result.log_sheets.map((sheet, i) => (
-                <div
-                  key={i}
-                  ref={(el) => { sheetRefs.current[i] = el; }}
-                  style={
-                    i === activeSheet
-                      ? {}
-                      : {
-                          position: "fixed",
-                          left: "-99999px",
-                          top: 0,
-                          width: 1100,        // give it a stable width so layout matches the visible sheet
-                          pointerEvents: "none",
-                        }
-                  }
-                  aria-hidden={i !== activeSheet}
-                >
-                  <LogSheet sheet={sheet} />
-                </div>
-              ))}
+              {/* Visible (modern) log sheet for the active day */}
+              <div ref={(el) => { sheetRefs.current[activeSheet] = el; }}>
+                <LogSheet sheet={result.log_sheets[activeSheet]} />
+              </div>
+
+              {/* Off-screen FMCSA-style PrintLogSheet for every day — used by
+                  the PDF exporter so the downloaded file matches the
+                  standard paper form (header + grid + remarks + recap +
+                  carrier/address fields). */}
+              <div
+                aria-hidden
+                style={{ position: "fixed", left: "-99999px", top: 0, pointerEvents: "none" }}
+              >
+                {result.log_sheets.map((sheet, i) => {
+                  const cumulativeMiles = result.log_sheets
+                    .slice(0, i + 1)
+                    .reduce((sum, s) => sum + (s.driving_miles ?? 0), 0);
+                  return (
+                    <div
+                      key={i}
+                      ref={(el) => { printRefs.current[i] = el; }}
+                      style={{ width: 1280, background: "#fff", marginBottom: 24 }}
+                    >
+                      <PrintLogSheet
+                        sheet={sheet}
+                        fromLabel={result.route?.waypoints?.[0]?.label ?? ""}
+                        toLabel={result.route?.waypoints?.[2]?.label ?? ""}
+                        cumulativeMiles={cumulativeMiles}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 

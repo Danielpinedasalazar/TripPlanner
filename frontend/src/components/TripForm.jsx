@@ -7,13 +7,19 @@ const LOCATION_FIELDS = [
   { name: "dropoff_location", label: "Dropoff Location" },
 ];
 
-const DRIVER_FIELDS = [
+// Fields rendered as plain text inputs
+const DRIVER_TEXT_FIELDS = [
   { name: "driver_name", label: "Driver Name" },
   { name: "carrier_name", label: "Carrier Name" },
-  { name: "main_office_address", label: "Main Office Address" },
   { name: "vehicle_numbers", label: "Vehicle / Truck Numbers" },
   { name: "co_driver_name", label: "Co-Driver Name" },
   { name: "shipping_number", label: "Pro / Shipping Number" },
+];
+
+// Fields rendered as location autocomplete inputs
+const DRIVER_LOCATION_FIELDS = [
+  { name: "main_office_address", label: "Main Office Address" },
+  { name: "home_terminal_address", label: "Home Terminal Address" },
 ];
 
 // Today @ 06:00 in the user's local timezone, formatted for <input type="datetime-local">.
@@ -37,6 +43,7 @@ export default function TripForm({ onSubmit, loading }) {
     driver_name: "",
     carrier_name: "",
     main_office_address: "",
+    home_terminal_address: "",
     vehicle_numbers: "",
     co_driver_name: "",
     shipping_number: "",
@@ -135,7 +142,23 @@ export default function TripForm({ onSubmit, loading }) {
             <p className="text-xs text-slate-400">
               Optional — appears on the printed log sheet header.
             </p>
-            {DRIVER_FIELDS.map(({ name, label }) => (
+            {/* Address fields with location autocomplete */}
+            {DRIVER_LOCATION_FIELDS.map(({ name, label }) => (
+              <div key={name}>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+                  {label}
+                </label>
+                <LocationInput
+                  name={name}
+                  value={form[name]}
+                  onChange={handle}
+                  placeholder={`Enter ${label.toLowerCase()}`}
+                />
+              </div>
+            ))}
+
+            {/* Plain text fields */}
+            {DRIVER_TEXT_FIELDS.map(({ name, label }) => (
               <div key={name}>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
                   {label}

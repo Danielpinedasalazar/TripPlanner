@@ -18,3 +18,4 @@ class TripPlanRequestSerializer(serializers.Serializer):
     vehicle_numbers = serializers.CharField(max_length=100, required=False, default="", allow_blank=True)
     shipping_number = serializers.CharField(max_length=100, required=False, default="", allow_blank=True)
     co_driver_name = serializers.CharField(max_length=100, required=False, default="", allow_blank=True)
+    home_terminal_address = serializers.CharField(max_length=300, required=False, default="", allow_blank=True)
